@@ -1225,8 +1225,230 @@ function updateSky(dt){
 }
 
 // ══════════════════════════════════════════════
-// MINIMAP
+// WEATHER SYSTEM
 // ══════════════════════════════════════════════
+const WEATHER_TYPES={
+  clear:   {name:'☀ Beau temps', fogNear:50,  fogFar:115, ambMul:1.0,  sunMul:1.0,  rainOp:0,    skyDark:0},
+  cloudy:  {name:'🌥 Nuageux',   fogNear:40,  fogFar:90,  ambMul:0.75, sunMul:0.5,  rainOp:0,    skyDark:.15},
+  rain:    {name:'🌧 Pluie',     fogNear:25,  fogFar:60,  ambMul:0.55, sunMul:0.2,  rainOp:0.55, skyDark:.35},
+  storm:   {name:'⛈ Orage',     fogNear:15,  fogFar:40,  ambMul:0.35, sunMul:0.05, rainOp:0.85, skyDark:.6},
+  snow:    {name:'🌨 Neige',     fogNear:30,  fogFar:70,  ambMul:0.65, sunMul:0.4,  rainOp:0.5,  skyDark:.2},
+};
+let currentWeather='clear';
+let nextWeather='clear';
+let weatherTimer=60+Math.random()*120; // seconds until next change
+let weatherTransition=0; // 0→1 blend
+let lightningTimer=0;
+let weatherParticles=null;
+
+// Rain/snow particle system
+function createWeatherParticles(){
+  if(weatherParticles){scene.remove(weatherParticles);weatherParticles=null;}
+  const count=1200;
+  const geo=new THREE.BufferGeometry();
+  const pos=new Float32Array(count*3);
+  for(let i=0;i<count;i++){
+    pos[i*3]=(Math.random()-0.5)*80;
+    pos[i*3+1]=Math.random()*40;
+    pos[i*3+2]=(Math.random()-0.5)*80;
+  }
+  geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
+  const isSnow=currentWeather==='snow';
+  const mat=new THREE.PointsMaterial({
+    color:isSnow?0xffffff:0x88aaff,
+    size:isSnow?0.25:0.08,
+    transparent:true,
+    opacity:WEATHER_TYPES[currentWeather].rainOp,
+    depthWrite:false,
+  });
+  weatherParticles=new THREE.Points(geo,mat);
+  weatherParticles.userData.velocities=new Float32Array(count*3);
+  for(let i=0;i<count;i++){
+    weatherParticles.userData.velocities[i*3]  =isSnow?(Math.random()-.5)*0.5:0;
+    weatherParticles.userData.velocities[i*3+1]=isSnow?-(0.8+Math.random()*1.2):-(6+Math.random()*4);
+    weatherParticles.userData.velocities[i*3+2]=isSnow?(Math.random()-.5)*0.5:0;
+  }
+  scene.add(weatherParticles);
+}
+
+function destroyWeatherParticles(){
+  if(weatherParticles){scene.remove(weatherParticles);weatherParticles.geometry.dispose();weatherParticles.material.dispose();weatherParticles=null;}
+}
+
+let lightningMesh=null;
+function triggerLightning(){
+  // Flash the sky
+  const flash=new THREE.AmbientLight(0xaabbff,8);
+  scene.add(flash);
+  setTimeout(()=>scene.remove(flash),80);
+  setTimeout(()=>{
+    const flash2=new THREE.AmbientLight(0xaabbff,5);
+    scene.add(flash2);
+    setTimeout(()=>scene.remove(flash2),60);
+  },120);
+  showMsg('⚡ Éclair !','#aaccff');
+}
+
+function pickNextWeather(){
+  const w=['clear','clear','clear','cloudy','cloudy','rain','rain','storm','snow'];
+  return w[Math.floor(Math.random()*w.length)];
+}
+
+function updateWeather(dt){
+  // Countdown to next weather
+  weatherTimer-=dt;
+  if(weatherTimer<=0){
+    nextWeather=pickNextWeather();
+    weatherTimer=45+Math.random()*180;
+    weatherTransition=0;
+  }
+  // Blend transition
+  if(currentWeather!==nextWeather){
+    weatherTransition=Math.min(1,weatherTransition+dt/15);
+    if(weatherTransition>=1){
+      currentWeather=nextWeather;
+      weatherTransition=1;
+      // Update particles
+      const needP=WEATHER_TYPES[currentWeather].rainOp>0;
+      if(needP) createWeatherParticles();
+      else destroyWeatherParticles();
+    }
+  }
+  const w=WEATHER_TYPES[currentWeather];
+  const wn=WEATHER_TYPES[nextWeather];
+  const t=weatherTransition;
+  const fogN=w.fogNear+(wn.fogNear-w.fogNear)*t;
+  const fogF=w.fogFar+(wn.fogFar-w.fogFar)*t;
+  scene.fog.near=fogN; scene.fog.far=fogF;
+  // Darken sky during bad weather
+  const dark=w.skyDark+(wn.skyDark-w.skyDark)*t;
+  const ambMul=w.ambMul+(wn.ambMul-w.ambMul)*t;
+  const sunMul=w.sunMul+(wn.sunMul-w.sunMul)*t;
+  ambLight.intensity=(0.1+Math.max(0,Math.sin(dayTime*Math.PI*2))*.5)*ambMul;
+  sunLight.intensity=(Math.max(0,Math.sin(dayTime*Math.PI*2))*1.3)*sunMul;
+  // Tint fog darker in storm
+  if(dark>0){
+    const base=scene.fog.color.clone();
+    base.r=Math.max(0,base.r-dark*.3);
+    base.g=Math.max(0,base.g-dark*.3);
+    base.b=Math.max(0,base.b-dark*.2);
+    scene.fog.color.copy(base);
+  }
+  // Animate rain/snow particles
+  if(weatherParticles){
+    const pos=weatherParticles.geometry.attributes.position.array;
+    const vel=weatherParticles.userData.velocities;
+    const px=player.pos.x,py=player.pos.y,pz=player.pos.z;
+    const count=pos.length/3;
+    for(let i=0;i<count;i++){
+      pos[i*3]  +=vel[i*3]*dt;
+      pos[i*3+1]+=vel[i*3+1]*dt;
+      pos[i*3+2]+=vel[i*3+2]*dt;
+      // Respawn above player when below
+      if(pos[i*3+1]<py-5){
+        pos[i*3]  =px+(Math.random()-0.5)*80;
+        pos[i*3+1]=py+30+Math.random()*10;
+        pos[i*3+2]=pz+(Math.random()-0.5)*80;
+      }
+    }
+    // Follow player XZ
+    weatherParticles.position.x=px;
+    weatherParticles.position.z=pz;
+    weatherParticles.geometry.attributes.position.needsUpdate=true;
+    weatherParticles.material.opacity=w.rainOp;
+  }
+  // Lightning during storm
+  if(currentWeather==='storm'){
+    lightningTimer-=dt;
+    if(lightningTimer<=0){
+      lightningTimer=3+Math.random()*8;
+      triggerLightning();
+    }
+  }
+  // Weather icon in HUD
+  const wicon=WEATHER_TYPES[currentWeather].name.split(' ')[0];
+  const clockEl=document.getElementById('clock');
+  if(clockEl){
+    const existing=clockEl.textContent;
+    // Replace weather icon at end if already there
+    const cleanText=existing.replace(/ [☀🌥🌧⛈🌨]$/,'');
+    clockEl.textContent=cleanText+' '+wicon;
+  }
+}
+
+// ══════════════════════════════════════════════
+// WATER FLOW SYSTEM
+// ══════════════════════════════════════════════
+const waterFlowQueue=new Set(); // "x,y,z" of blocks to process
+let waterFlowTimer=0;
+
+function scheduleWaterFlow(wx,wy,wz){
+  // Check all 6 neighbours of a destroyed block for adjacent water
+  const nbrs=[[1,0,0],[-1,0,0],[0,1,0],[0,-1,0],[0,0,1],[0,0,-1]];
+  for(const[dx,dy,dz] of nbrs){
+    const nx=wx+dx,ny=wy+dy,nz=wz+dz;
+    if(gbw(nx,ny,nz)===WATER) waterFlowQueue.add(nx+','+ny+','+nz);
+  }
+}
+
+function tickWaterFlow(){
+  waterFlowTimer+=1;
+  if(waterFlowTimer<4) return; // run every 4 frames (~15fps) for Minecraft feel
+  waterFlowTimer=0;
+  if(!waterFlowQueue.size) return;
+
+  const toProcess=[...waterFlowQueue];
+  waterFlowQueue.clear();
+  const newDirty=new Set();
+
+  for(const key of toProcess){
+    const[wx,wy,wz]=key.split(',').map(Number);
+    if(gbw(wx,wy,wz)!==WATER) continue; // block no longer water, skip
+
+    // Flow DOWN first (gravity)
+    const below=gbw(wx,wy-1,wz);
+    if(below===AIR&&wy>1){
+      sbw(wx,wy-1,wz,WATER);
+      changeLog.set(wx+','+(wy-1)+','+wz,{x:wx,y:wy-1,z:wz,b:WATER});
+      waterFlowQueue.add(wx+','+(wy-1)+','+wz);
+      newDirty.add(ck(Math.floor(wx/CS),Math.floor(wz/CS)));
+      continue; // don't spread sideways if flowing down
+    }
+
+    // Spread SIDEWAYS (only if can't flow down)
+    const canFlowDown=(below===AIR&&wy>1);
+    if(!canFlowDown){
+      const sides=[[1,0],[-1,0],[0,1],[0,-1]];
+      for(const[dx,dz] of sides){
+        const nx=wx+dx,nz=wz+dz;
+        if(gbw(nx,wy,nz)===AIR){
+          sbw(nx,wy,nz,WATER);
+          changeLog.set(nx+','+wy+','+nz,{x:nx,y:wy,z:nz,b:WATER});
+          waterFlowQueue.add(nx+','+wy+','+nz);
+          newDirty.add(ck(Math.floor(nx/CS),Math.floor(nz/CS)));
+        }
+      }
+    }
+  }
+  // Rebuild affected chunks
+  for(const k of newDirty) dirtySet.add(k);
+}
+
+// Hook water flow into block breaking
+const _sbwTrackedOrigWF=sbwTracked;
+function sbwTracked(wx,wy,wz,b){
+  _sbwTrackedOrigWF(wx,wy,wz,b);
+  if(b===AIR) scheduleWaterFlow(wx,wy,wz);
+}
+
+// ── Weather HUD element ──────────────────────
+(function addWeatherHUD(){
+  const el=document.createElement('div');
+  el.id='weatherEl';
+  el.style.cssText='position:absolute;top:10px;right:155px;color:rgba(255,255,255,.85);font:bold 12px monospace;text-shadow:1px 1px 2px #000;pointer-events:none;';
+  el.textContent='';
+  document.getElementById('hud').appendChild(el);
+})();
 const mmCtx=document.getElementById('mmCv').getContext('2d');
 let mmTick=0;
 const mmCache=new Map();
@@ -1317,6 +1539,33 @@ function updateUI(){
 // HOTBAR
 // ══════════════════════════════════════════════
 let selSlot=0;
+let activeBlock=null; // overrides HOTBAR[selSlot] when set from inventory
+
+function getPlaceBlock(){return activeBlock!==null?activeBlock:HOTBAR[selSlot];}
+function setActiveBlock(bid){
+  activeBlock=bid;
+  // Highlight hotbar slot if block is in HOTBAR, else show overlay
+  refreshHB();
+  updateActiveBlockHUD();
+}
+function clearActiveBlock(){activeBlock=null;refreshHB();updateActiveBlockHUD();}
+
+function updateActiveBlockHUD(){
+  let el=document.getElementById('activeBlockHUD');
+  if(!el){
+    el=document.createElement('div');
+    el.id='activeBlockHUD';
+    el.style.cssText='position:absolute;bottom:82px;left:50%;transform:translateX(-50%);color:#ffcc44;font:bold 11px monospace;text-shadow:1px 1px 2px #000;pointer-events:none;display:none;background:rgba(0,0,0,.6);padding:3px 12px;border-radius:10px;border:1px solid rgba(255,200,50,.3);';
+    document.getElementById('hud').appendChild(el);
+  }
+  if(activeBlock!==null){
+    const def=BD[activeBlock];
+    el.style.display='block';
+    el.textContent='✋ '+( def?def[0]:'?')+' (inventaire)';
+  } else {
+    el.style.display='none';
+  }
+}
 function buildHotbar(){
   const hb=document.getElementById('hb-row');hb.innerHTML='';
   HOTBAR.forEach((bid,i)=>{
@@ -1338,7 +1587,14 @@ function buildHotbar(){
     hb.appendChild(sl);
   });
 }
-function refreshHB(){document.querySelectorAll('.hslot').forEach((s,i)=>s.classList.toggle('on',i===selSlot));}
+function refreshHB(){
+  document.querySelectorAll('.hslot').forEach((s,i)=>{
+    const isHotbarActive=i===selSlot&&activeBlock===null;
+    const isInvActive=activeBlock!==null&&HOTBAR[i]===activeBlock;
+    s.classList.toggle('on',isHotbarActive||isInvActive);
+    s.style.borderColor=(isInvActive)?'#ffcc44':(isHotbarActive?'#fff':'');
+  });
+}
 
 // ══════════════════════════════════════════════
 // INPUT
@@ -1381,7 +1637,7 @@ document.addEventListener('mouseup',e=>{
     const box=pBox(player.pos);
     const bOverlap=(fx+1>box.x0&&fx<box.x1&&fy+1>box.y0&&fy<box.y1&&fz+1>box.z0&&fz<box.z1);
     if(!bOverlap){
-      const bid=HOTBAR[selSlot];
+      const bid=getPlaceBlock();
       // Right-click on existing cannon = fire manually
       if(gbw(bx,by,bz)===CANNON){
         const ckey2=bx+','+by+','+bz;
@@ -1403,14 +1659,18 @@ document.addEventListener('mouseup',e=>{
       // Register cannon facing player's yaw
       if(bid===CANNON) registerCannon(fx,fy,fz,player.yaw);
       // Deduct from inventory if block was bought
-      if(blockInventory.has(bid)) useFromInventory(bid);
+      if(blockInventory.has(bid)){
+        useFromInventory(bid);
+        // If this was the active (non-hotbar) block and inventory is now empty, clear it
+        if(activeBlock===bid&&(blockInventory.get(bid)||0)===0) clearActiveBlock();
+      }
     }
   }
 });
 document.addEventListener('keydown',e=>{
   keys[e.code]=true;if(!started) return;
   checkHealthCode(e.key);
-  const n=parseInt(e.key);if(n>=1&&n<=9){selSlot=n-1;refreshHB();}
+  const n=parseInt(e.key);if(n>=1&&n<=9){selSlot=n-1;clearActiveBlock();refreshHB();}
   if(e.code==='KeyI'){openInventory();}
   if(e.code==='KeyE'){
     const shopType=findNearbyShop();
@@ -1461,7 +1721,7 @@ document.addEventListener('keydown',e=>{
 });
 document.addEventListener('keyup',e=>{keys[e.code]=false;});
 document.addEventListener('wheel',e=>{
-  if(!started) return;selSlot=(selSlot+(e.deltaY>0?1:-1)+9)%9;refreshHB();
+  if(!started) return;selSlot=(selSlot+(e.deltaY>0?1:-1)+9)%9;clearActiveBlock();refreshHB();
 },{passive:true});
 document.addEventListener('contextmenu',e=>e.preventDefault());
 
@@ -1477,6 +1737,409 @@ const bioNames={ocean:'Océan',beach:'Plage',plains:'Plaine',forest:'Forêt',des
 // ══════════════════════════════════════════════
 const CITY_X=200, CITY_Z=200;
 let cityBuilt=false;
+
+// ══════════════════════════════════════════════
+// WORLD STRUCTURES
+// ══════════════════════════════════════════════
+const STRUCTURES=[
+  // [name, icon, placeType, x, z, biome hint, buildFn]
+  {name:'🏘 Village Paysan',     icon:'🏘', type:'house',     x:-120, z: 80,  built:false},
+  {name:'💀 Donjon Maudit',      icon:'💀', type:'dungeon',   x: 80,  z:-180, built:false},
+  {name:'🏜 Temple du Désert',   icon:'🏜', type:'church',    x: 340, z: 60,  built:false},
+  {name:'❄ Forteresse de Glace', icon:'❄',  type:'castle',    x:-200, z:-200, built:false},
+  {name:'⚓ Épave de Pirate',     icon:'⚓', type:'port',      x: 50,  z: 320, built:false},
+  {name:'🏰 Château en Ruines',   icon:'🏰', type:'castle',    x:-280, z: 140, built:false},
+  {name:'🌿 Temple de la Jungle', icon:'🌿', type:'library',   x: 180, z: 280, built:false},
+  {name:'⛏ Mine Abandonnée',     icon:'⛏', type:'mine',      x:-60,  z:-120, built:false},
+  {name:'🏮 Phare',              icon:'🏮', type:'tower',     x: 420, z: 180, built:false},
+  {name:'💎 Crypte Souterraine', icon:'💎', type:'dungeon',   x: 120, z:-80,  built:false},
+];
+
+const builtStructures=new Set();
+
+function tickStructures(){
+  for(const s of STRUCTURES){
+    if(s.built) continue;
+    const dx=player.pos.x-s.x, dz=player.pos.z-s.z;
+    const dist2=dx*dx+dz*dz;
+    if(dist2>80*80) continue; // only build when within 80 blocks
+    // Check chunk loaded
+    const cx=Math.floor(s.x/CS), cz=Math.floor(s.z/CS);
+    if(!worldData.has(ck(cx,cz))) continue;
+    s.built=true;
+    buildStructure(s);
+  }
+}
+
+function buildStructure(s){
+  const bY=getSurfH(s.x,s.z)+1;
+  switch(s.icon){
+    case '🏘': buildVillage(s.x,bY,s.z); break;
+    case '💀': buildDungeon(s.x,bY,s.z); break;
+    case '🏜': buildDesertTemple(s.x,bY,s.z); break;
+    case '❄':  buildIceFortress(s.x,bY,s.z); break;
+    case '⚓': buildShipwreck(s.x,bY,s.z); break;
+    case '🏰': buildRuinedCastle(s.x,bY,s.z); break;
+    case '🌿': buildJungleTemple(s.x,bY,s.z); break;
+    case '⛏': buildAbandonedMine(s.x,bY,s.z); break;
+    case '🏮': buildLighthouse(s.x,bY,s.z); break;
+    case '💎': buildCrypt(s.x,bY,s.z); break;
+  }
+  // Add landmark automatically
+  if(!landmarks.find(l=>l.name===s.name)){
+    landmarks.push({name:s.name,x:s.x,y:bY+4,z:s.z,biome:getBiome(s.x,s.z),placeType:s.type,time:Date.now()});
+    saveLandmarks();
+  }
+  // Dirty affected chunks
+  for(let cx2=Math.floor((s.x-40)/CS);cx2<=Math.floor((s.x+40)/CS);cx2++)
+    for(let cz2=Math.floor((s.z-40)/CS);cz2<=Math.floor((s.z+40)/CS);cz2++)
+      dirtySet.add(ck(cx2,cz2));
+  showMsg(s.icon+' '+s.name+' découvert !','#ffdd44');
+}
+
+// Helper: place hollow structure with floor and ceiling
+function hollowRoom(x1,y1,z1,x2,y2,z2,wall,fl,ceil){
+  for(let x=x1;x<=x2;x++) for(let y=y1;y<=y2;y++) for(let z=z1;z<=z2;z++){
+    const onWall=x===x1||x===x2||z===z1||z===z2;
+    const onFloor=y===y1, onCeil=y===y2;
+    if(onFloor) sbw(x,y,z,fl||wall);
+    else if(onCeil) sbw(x,y,z,ceil||wall);
+    else if(onWall) sbw(x,y,z,wall);
+    else sbw(x,y,z,AIR);
+  }
+}
+
+// ── 🏘 Village paysan (5 maisons + puits + villageois) ──
+function buildVillage(ox,bY,oz){
+  // Flatten
+  for(let dx=-18;dx<=18;dx++) for(let dz=-18;dz<=18;dz++){
+    const h=getSurfH(ox+dx,oz+dz);
+    for(let y=h-1;y<=bY-1;y++) sbw(ox+dx,y,oz+dz,DIRT);
+    sbw(ox+dx,bY-1,oz+dz,GRASS);
+  }
+  // Dirt path cross
+  for(let i=-18;i<=18;i++){sbw(ox+i,bY-1,oz,DIRT);sbw(ox,bY-1,oz+i,DIRT);}
+  // 5 houses in a circle
+  const houses=[
+    {x:-12,z:-12,w:7,d:7,h:5,wall:OAK_PLANKS,roof:BRICKS},
+    {x: 6, z:-14,w:9,d:7,h:5,wall:COBBLE,    roof:SANDSTONE},
+    {x:-14,z: 6, w:7,d:9,h:5,wall:OAK_PLANKS,roof:COBBLE},
+    {x: 6, z: 6, w:8,d:8,h:6,wall:BRICKS,    roof:STONE},   // big house
+    {x:-4, z:-5, w:5,d:5,h:4,wall:SANDSTONE,  roof:OAK_PLANKS}, // small hut
+  ];
+  for(const h of houses){
+    const bx=ox+h.x,bz=oz+h.z;
+    // Walls
+    for(let dx=0;dx<h.w;dx++) for(let dz=0;dz<h.d;dz++) for(let dy=0;dy<h.h;dy++){
+      const wx=bx+dx,wy=bY+dy,wz=bz+dz;
+      const isW=dx===0||dx===h.w-1||dz===0||dz===h.d-1;
+      const isR=dy===h.h-1;
+      if(isR) sbw(wx,wy,wz,h.roof);
+      else if(isW){
+        const win=(dy===2)&&((dz===0||dz===h.d-1)&&dx>0&&dx<h.w-1&&dx%3===1||(dx===0||dx===h.w-1)&&dz>0&&dz<h.d-1&&dz%3===1);
+        sbw(wx,wy,wz,win?GLASS:h.wall);
+      } else if(dy===0) sbw(wx,wy,wz,OAK_PLANKS);
+    }
+    // Door
+    sbw(bx+Math.floor(h.w/2),bY+1,bz,AIR);sbw(bx+Math.floor(h.w/2),bY+2,bz,AIR);
+    // Torch inside
+    sbw(bx+1,bY+2,bz+1,TORCH);
+  }
+  // Well
+  for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++){
+    if(Math.abs(dx)+Math.abs(dz)===2) continue;
+    sbw(ox+dx,bY,oz+dz,COBBLE);
+  }
+  sbw(ox,bY-1,oz,WATER);sbw(ox,bY,oz,AIR);
+  // Fences around (symbolic)
+  for(let i=-18;i<=18;i+=6){sbw(ox+i,bY,oz-18,OAK_LOG);sbw(ox+i,bY,oz+18,OAK_LOG);sbw(ox-18,bY,oz+i,OAK_LOG);sbw(ox+18,bY,oz+i,OAK_LOG);}
+  // Spawn villager bots
+  for(let i=0;i<5;i++) spawnBot(ox+(Math.random()*30-15),bY,oz+(Math.random()*30-15),null);
+  // Register shop in biggest house
+  registerShop(ox+6+4,bY+1,oz+6,Math.random()<.5?'market':'food');
+}
+
+// ── 💀 Donjon maudit (tour sombre avec zombies) ──
+function buildDungeon(ox,bY,oz){
+  // Main tower
+  const h=14,w=10;
+  for(let dx=0;dx<w;dx++) for(let dy=0;dy<h;dy++) for(let dz=0;dz<w;dz++){
+    const wx=ox+dx,wy=bY+dy,wz=oz+dz;
+    const isW=dx===0||dx===w-1||dz===0||dz===w-1;
+    const isF=dy===0||dy===h-1;
+    if(isF||isW){
+      const isSlot=(dy===3||dy===7)&&((dz===0||dz===w-1)&&dx===Math.floor(w/2)||(dx===0||dx===w-1)&&dz===Math.floor(w/2));
+      sbw(wx,wy,wz,isSlot?GLASS:COBBLE);
+    } else sbw(wx,wy,wz,AIR);
+  }
+  // Battlements
+  for(let dx=0;dx<w;dx+=2){sbw(ox+dx,bY+h,oz,COBBLE);sbw(ox+dx,bY+h,oz+w-1,COBBLE);}
+  for(let dz=0;dz<w;dz+=2){sbw(ox,bY+h,oz+dz,COBBLE);sbw(ox+w-1,bY+h,oz+dz,COBBLE);}
+  // Door (front)
+  sbw(ox+Math.floor(w/2),bY+1,oz,AIR);sbw(ox+Math.floor(w/2),bY+2,oz,AIR);
+  // Interior floors
+  fillBox(ox+1,bY+4,oz+1,ox+w-2,bY+4,oz+w-2,STONE);
+  fillBox(ox+1,bY+8,oz+1,ox+w-2,bY+8,oz+w-2,STONE);
+  // Staircases
+  for(let i=0;i<4;i++){sbw(ox+1,bY+1+i,oz+w-2-i,COBBLE);}
+  for(let i=0;i<4;i++){sbw(ox+1,bY+5+i,oz+w-2-i,COBBLE);}
+  // Obsidian floor (underground entrance)
+  fillBox(ox+1,bY-3,oz+1,ox+w-2,bY-1,oz+w-2,AIR);
+  fillBox(ox+1,bY-3,oz+1,ox+w-2,bY-3,oz+w-2,OBSIDIAN);
+  // Torches
+  sbw(ox+2,bY+2,oz+2,TORCH);sbw(ox+w-3,bY+6,oz+2,TORCH);
+  // Spawn zombies
+  for(let i=0;i<4;i++) spawnEntity('zombie',ox+2+Math.random()*6,bY+1,oz+2+Math.random()*6);
+  // Chest-like loot area (obsidian + gold ore)
+  sbw(ox+3,bY+1,oz+3,GOLD_ORE);sbw(ox+6,bY+1,oz+6,IRON_ORE);sbw(ox+4,bY+1,oz+5,COAL_ORE);
+}
+
+// ── 🏜 Temple du désert ──
+function buildDesertTemple(ox,bY,oz){
+  const W=20,H=10;
+  // Base platform
+  fillBox(ox-W/2|0,bY-2,oz-W/2|0,ox+W/2|0,bY-1,oz+W/2|0,SANDSTONE);
+  // 4 corner towers
+  for(const[tx,tz] of[[-8,-8],[-8,8],[8,-8],[8,8]]){
+    for(let dy=0;dy<H;dy++) for(let dx=0;dx<4;dx++) for(let dz=0;dz<4;dz++){
+      const isW=dx===0||dx===3||dz===0||dz===3;
+      if(isW||dy===0||dy===H-1) sbw(ox+tx+dx,bY+dy,oz+tz+dz,SANDSTONE);
+      else sbw(ox+tx+dx,bY+dy,oz+tz+dz,AIR);
+    }
+    sbw(ox+tx+1,bY+H,oz+tz+1,GOLD_ORE); // gold cap
+  }
+  // Central hall
+  hollowRoom(ox-4,bY,oz-4,ox+4,bY+6,oz+4,SANDSTONE,SANDSTONE,SANDSTONE);
+  // Windows
+  for(const[wx,wz] of[[-4,0],[4,0],[0,-4],[0,4]]) sbw(ox+wx,bY+3,oz+wz,GLASS);
+  // Door
+  sbw(ox-4,bY+1,oz,AIR);sbw(ox-4,bY+2,oz,AIR);
+  // Interior torches + loot
+  sbw(ox-2,bY+1,oz+2,TORCH);sbw(ox+2,bY+1,oz-2,TORCH);
+  sbw(ox,bY+1,oz,GOLD_ORE);
+  fillBox(ox-3,bY,oz-3,ox+3,bY,oz+3,SANDSTONE);
+  // Spawner: skeletons
+  for(let i=0;i<3;i++) spawnEntity('skeleton',ox+(Math.random()*6-3),bY+1,oz+(Math.random()*6-3));
+}
+
+// ── ❄ Forteresse de glace ──
+function buildIceFortress(ox,bY,oz){
+  // Outer walls
+  for(let dx=-15;dx<=15;dx++) for(let dz=-15;dz<=15;dz++){
+    const onWall=(Math.abs(dx)===15||Math.abs(dz)===15);
+    const isGate=(dz===-15&&Math.abs(dx)<=2)||(dz===15&&Math.abs(dx)<=2);
+    if(onWall&&!isGate) for(let dy=0;dy<6;dy++) sbw(ox+dx,bY+dy,oz+dz,ICE);
+    else if(onWall&&isGate) for(let dy=3;dy<6;dy++) sbw(ox+dx,bY+dy,oz+dz,ICE);
+  }
+  // Towers
+  for(const[tx,tz] of[[-15,-15],[-15,15],[15,-15],[15,15]]){
+    for(let dy=0;dy<10;dy++) for(let dx=0;dx<4;dx++) for(let dz=0;dz<4;dz++){
+      const isW=dx===0||dx===3||dz===0||dz===3;
+      if(isW||dy===0||dy===9) sbw(ox+tx+dx,bY+dy,oz+tz+dz,ICE);
+    }
+    sbw(ox+tx+1,bY+10,oz+tz+1,SNOW_BLOCK);
+    sbw(ox+tx+2,bY+10,oz+tz+2,SNOW_BLOCK);
+  }
+  // Central keep
+  hollowRoom(ox-5,bY,oz-5,ox+5,bY+8,oz+5,COBBLE,STONE,COBBLE);
+  sbw(ox-5,bY+1,oz,AIR);sbw(ox-5,bY+2,oz,AIR); // door
+  sbw(ox,bY+1,oz,TORCH);
+  // Snow floor
+  fillBox(ox-14,bY-1,oz-14,ox+14,bY-1,oz+14,SNOW_BLOCK);
+  // Register shop (blacksmith inside)
+  registerShop(ox,bY+1,oz,Math.random()<.5?'armorer':'market');
+  // Spawn skeletons
+  for(let i=0;i<5;i++) spawnEntity('skeleton',ox+(Math.random()*20-10),bY+1,oz+(Math.random()*20-10));
+}
+
+// ── ⚓ Épave de pirate ──
+function buildShipwreck(ox,bY,oz){
+  // Hull (tilted slightly)
+  for(let dx=0;dx<18;dx++){
+    const tilt=(dx<6?0:dx<12?1:2);
+    const ht=4+tilt;
+    for(let dz=-3;dz<=3;dz++) for(let dy=0;dy<ht;dy++){
+      const isW=dz===-3||dz===3||dy===0||dy===ht-1;
+      if(isW) sbw(ox+dx,bY+dy+tilt,oz+dz,OAK_PLANKS);
+      else sbw(ox+dx,bY+dy+tilt,oz+dz,AIR);
+    }
+    // Pointy bow
+    if(dx===0){for(let dz=-1;dz<=1;dz++) sbw(ox-1,bY+dz+2,oz+dz,OAK_PLANKS);}
+  }
+  // Mast
+  for(let dy=0;dy<12;dy++) sbw(ox+9,bY+5+dy,oz,OAK_LOG);
+  // Sail (glass blocks)
+  for(let dy=0;dy<5;dy++) for(let dz=-2;dz<=2;dz++) if(gbw(ox+9,bY+6+dy,oz+dz)===AIR) sbw(ox+9,bY+6+dy,oz+dz,GLASS);
+  // Water around
+  for(let dx=-2;dx<20;dx++) for(let dz=-5;dz<=5;dz++) if(gbw(ox+dx,bY-1,oz+dz)===AIR) sbw(ox+dx,bY-1,oz+dz,WATER);
+  // Loot
+  sbw(ox+6,bY+1,oz,GOLD_ORE);sbw(ox+12,bY+2,oz,IRON_ORE);
+  sbw(ox+4,bY+1,oz+2,TORCH);
+  // Register shop (pirate market)
+  registerShop(ox+9,bY+1,oz,Math.random()<.5?'market':'armorer');
+}
+
+// ── 🏰 Château en ruines ──
+function buildRuinedCastle(ox,bY,oz){
+  // Outer walls (partially destroyed)
+  for(let dx=-20;dx<=20;dx++) for(let dz=-20;dz<=20;dz++){
+    const onWall=(Math.abs(dx)===20||Math.abs(dz)===20);
+    if(!onWall) continue;
+    const maxH=3+Math.floor(h21(ox+dx,oz+dz)*5);
+    for(let dy=0;dy<maxH;dy++) sbw(ox+dx,bY+dy,oz+dz,COBBLE);
+  }
+  // 2 intact towers
+  for(const[tx,tz] of[[-20,-20],[20,20]]){
+    for(let dy=0;dy<10;dy++) for(let dx=0;dx<5;dx++) for(let dz=0;dz<5;dz++){
+      const isW=dx===0||dx===4||dz===0||dz===4;
+      if(isW||dy===0) sbw(ox+tx+dx,bY+dy,oz+tz+dz,STONE);
+      else sbw(ox+tx+dx,bY+dy,oz+tz+dz,AIR);
+    }
+    sbw(ox+tx+2,bY+2,oz+tz+2,TORCH);
+  }
+  // Central ruined hall
+  for(let dx=-8;dx<=8;dx++) for(let dz=-8;dz<=8;dz++){
+    const isW=(Math.abs(dx)===8||Math.abs(dz)===8);
+    if(isW){const h2=1+Math.floor(h21(ox+dx*3,oz+dz*3)*6);for(let dy=0;dy<h2;dy++) sbw(ox+dx,bY+dy,oz+dz,BRICKS);}
+    else sbw(ox+dx,bY-1,oz+dz,COBBLE);
+  }
+  // Scattered debris
+  for(let i=0;i<30;i++){
+    const dx=(Math.random()*34-17)|0,dz=(Math.random()*34-17)|0;
+    sbw(ox+dx,bY,oz+dz,[COBBLE,STONE,BRICKS][Math.floor(Math.random()*3)]);
+  }
+  sbw(ox,bY,oz,OBSIDIAN);
+  // Spawn zombies/skeletons
+  for(let i=0;i<6;i++) spawnEntity(Math.random()<.5?'zombie':'skeleton',ox+(Math.random()*30-15),bY+1,oz+(Math.random()*30-15));
+}
+
+// ── 🌿 Temple de la jungle ──
+function buildJungleTemple(ox,bY,oz){
+  // Stepped pyramid
+  const steps=4;
+  for(let s=0;s<steps;s++){
+    const w=12-s*2,h2=3;
+    for(let dx=-w/2|0;dx<=w/2;dx++) for(let dz=-w/2|0;dz<=w/2;dz++) for(let dy=0;dy<h2;dy++){
+      const isW=(Math.abs(dx)===Math.floor(w/2)||Math.abs(dz)===Math.floor(w/2));
+      if(isW||dy===0) sbw(ox+dx,bY+s*h2+dy,oz+dz,COBBLE);
+      else sbw(ox+dx,bY+s*h2+dy,oz+dz,AIR);
+    }
+  }
+  // Top altar
+  fillBox(ox-2,bY+steps*3,oz-2,ox+2,bY+steps*3,oz+2,GOLD_ORE);
+  sbw(ox,bY+steps*3+1,oz,TORCH);
+  // Door
+  sbw(ox-6,bY+1,oz,AIR);sbw(ox-6,bY+2,oz,AIR);
+  // Vines (leaves around)
+  for(let dx=-8;dx<=8;dx++) for(let dz=-8;dz<=8;dz++){
+    if(Math.random()<.15) sbw(ox+dx,bY+1,oz+dz,OAK_LEAVES);
+    if(Math.random()<.08) sbw(ox+dx,bY,oz+dz,CACTUS);
+  }
+  // Trees around
+  for(const[tx,tz] of[[-10,-10],[10,-10],[-10,10],[10,10]]){
+    for(let dy=0;dy<6;dy++) sbw(ox+tx,bY+dy,oz+tz,OAK_LOG);
+    for(let dx=-2;dx<=2;dx++) for(let dz=-2;dz<=2;dz++) for(let dy=4;dy<=7;dy++) if(!gbw(ox+tx+dx,bY+dy,oz+tz+dz)) sbw(ox+tx+dx,bY+dy,oz+tz+dz,OAK_LEAVES);
+  }
+  // Spawner: spiders
+  for(let i=0;i<4;i++) spawnEntity('spider',ox+(Math.random()*10-5),bY+1,oz+(Math.random()*10-5));
+  registerShop(ox-5,bY+1,oz,'market');
+}
+
+// ── ⛏ Mine abandonnée ──
+function buildAbandonedMine(ox,bY,oz){
+  // Entrance tunnel going down
+  for(let i=0;i<20;i++){
+    const y=bY-i,x=ox+i;
+    sbw(x,y,oz,AIR);sbw(x,y+1,oz,AIR);sbw(x,y+2,oz,AIR);
+    sbw(x,y-1,oz,COBBLE);sbw(x,y+3,oz,COBBLE);
+    if(i%3===0) sbw(x,y+1,oz,TORCH);
+    // Side tunnels
+    if(i===8||i===16){
+      for(let j=-6;j<=6;j++){
+        sbw(x,y,oz+j,AIR);sbw(x,y+1,oz+j,AIR);
+        sbw(x,y-1,oz+j,COBBLE);
+        if(Math.abs(j)===6) for(let dy=-1;dy<=2;dy++) sbw(x,y+dy,oz+j,COBBLE);
+      }
+      sbw(x,y,oz-4,TORCH);sbw(x,y,oz+4,TORCH);
+    }
+  }
+  // Ore veins around entrance
+  for(let i=0;i<12;i++){
+    const dx=(Math.random()*16-4)|0,dy=(-Math.random()*10)|0,dz=(Math.random()*8-4)|0;
+    sbw(ox+dx,bY+dy,oz+dz,[COAL_ORE,IRON_ORE,GOLD_ORE][Math.floor(Math.random()*3)]);
+  }
+  // Wooden support beams
+  for(let i=4;i<20;i+=5){
+    sbw(ox+i,bY-i+1,oz-2,OAK_LOG);sbw(ox+i,bY-i+1,oz+2,OAK_LOG);
+    sbw(ox+i,bY-i+2,oz-1,OAK_LOG);sbw(ox+i,bY-i+2,oz,OAK_LOG);sbw(ox+i,bY-i+2,oz+1,OAK_LOG);
+  }
+  // Mine cart track (symbolic: iron ore blocks)
+  for(let i=0;i<18;i++) sbw(ox+i,bY-i-1,oz,IRON_ORE);
+  // Spawn coal/iron near entrance above ground
+  sbw(ox+1,bY,oz+1,COAL_ORE);sbw(ox+2,bY,oz-1,IRON_ORE);
+}
+
+// ── 🏮 Phare ──
+function buildLighthouse(ox,bY,oz){
+  const H=22;
+  // Octagonal-ish tower
+  for(let dy=0;dy<H;dy++){
+    const r=dy<H-4?2:3;
+    for(let dx=-r;dx<=r;dx++) for(let dz=-r;dz<=r;dz++){
+      const isW=(Math.abs(dx)===r||Math.abs(dz)===r)&&(dx*dx+dz*dz<=r*r+r);
+      if(isW||dy===0) sbw(ox+dx,bY+dy,oz+dz,COBBLE);
+      else sbw(ox+dx,bY+dy,oz+dz,AIR);
+    }
+    // Inner spiral staircase
+    const step=((dy%8));
+    const stairX=[0,1,1,1,0,-1,-1,-1][step];
+    const stairZ=[-1,-1,0,1,1,1,0,-1][step];
+    sbw(ox+stairX,bY+dy,oz+stairZ,STONE);
+    if(dy%4===0) sbw(ox,bY+dy,oz,TORCH);
+  }
+  // Lamp at top (glass + gold ore)
+  for(let dx=-2;dx<=2;dx++) for(let dz=-2;dz<=2;dz++) sbw(ox+dx,bY+H,oz+dz,GLASS);
+  sbw(ox,bY+H,oz,GOLD_ORE);
+  sbw(ox,bY+H-1,oz,TORCH);
+  // Base platform
+  fillBox(ox-4,bY-1,oz-4,ox+4,bY-1,oz+4,COBBLE);
+  // Door
+  sbw(ox-2,bY+1,oz,AIR);sbw(ox-2,bY+2,oz,AIR);
+  // Water around (island effect)
+  for(let dx=-6;dx<=6;dx++) for(let dz=-6;dz<=6;dz++) if(dx*dx+dz*dz>16&&gbw(ox+dx,bY-1,oz+dz)===AIR) sbw(ox+dx,bY-1,oz+dz,WATER);
+  // Spawn bot as lighthouse keeper
+  spawnBot(ox,bY+1,oz+1,{x0:ox-3,x1:ox+3,z0:oz-3,z1:oz+3});
+}
+
+// ── 💎 Crypte souterraine ──
+function buildCrypt(ox,bY,oz){
+  const depth=8;
+  // Entrance shaft
+  for(let dy=0;dy<depth;dy++){
+    sbw(ox,bY-dy,oz,AIR);sbw(ox+1,bY-dy,oz,AIR);
+    if(dy===0||dy===depth-1){sbw(ox-1,bY-dy,oz,COBBLE);sbw(ox+2,bY-dy,oz,COBBLE);}
+    if(dy%3===0) sbw(ox,bY-dy,oz+1,TORCH);
+  }
+  // Main chamber underground
+  const cy=bY-depth;
+  hollowRoom(ox-8,cy-3,oz-8,ox+8,cy,oz+8,STONE,OBSIDIAN,STONE);
+  // Pillars
+  for(const[px2,pz2] of[[-6,-6],[-6,6],[6,-6],[6,6]]){
+    for(let dy=-2;dy<=0;dy++) sbw(ox+px2,cy+dy,oz+pz2,COBBLE);
+    sbw(ox+px2,cy+1,oz+pz2,TORCH);
+  }
+  // Central altar with loot
+  fillBox(ox-2,cy-2,oz-2,ox+2,cy-2,oz+2,OBSIDIAN);
+  sbw(ox,cy-1,oz,GOLD_ORE);sbw(ox-1,cy-1,oz,IRON_ORE);sbw(ox+1,cy-1,oz,COAL_ORE);
+  sbw(ox,cy,oz,TORCH);
+  // Side tombs
+  for(const[tx,tz] of[[-6,0],[6,0],[0,-6],[0,6]]){
+    fillBox(ox+tx-1,cy-3,oz+tz-1,ox+tx+1,cy-2,oz+tz+1,COBBLE);
+    sbw(ox+tx,cy-2,oz+tz,OBSIDIAN);
+  }
+  // Spawn undead
+  for(let i=0;i<6;i++) spawnEntity(Math.random()<.6?'zombie':'skeleton',ox+(Math.random()*12-6),cy-1,oz+(Math.random()*12-6));
+}
 
 // ── Shop system ───────────────────────────────
 let playerCoins=0;
@@ -1613,7 +2276,7 @@ function registerShop(x,y,z,type){shopRegistry.set(x+','+y+','+z,type);}
 
 function findNearbyShop(){
   const px=player.pos.x|0,py=player.pos.y|0,pz=player.pos.z|0;
-  for(let dx=-3;dx<=3;dx++) for(let dz=-3;dz<=3;dz++) for(let dy=-2;dy<=2;dy++){
+  for(let dx=-6;dx<=6;dx++) for(let dz=-6;dz<=6;dz++) for(let dy=-4;dy<=4;dy++){
     const k=(px+dx)+','+(py+dy)+','+(pz+dz);
     if(shopRegistry.has(k)) return shopRegistry.get(k);
   }
@@ -2549,6 +3212,8 @@ function loop(ts){
     buildCity();
     setTimeout(spawnCityBots,2000);
   }
+  // Auto-build world structures when player approaches
+  tickStructures();
   const{bx,by,bz}=doRay();
   if(bx!==null){hlMesh.position.set(bx+.5,by+.5,bz+.5);hlMesh.visible=true;}else hlMesh.visible=false;
   if(++mmTick%10===0){drawMinimap();updateUI();}
@@ -2843,7 +3508,7 @@ function renderInventoryGrid(){
     const def=BD[bid]; if(!def) continue;
     const hotbarIdx=HOTBAR.indexOf(bid);
     const slot=document.createElement('div');
-    slot.className='invSlot'+(invSelectedBlock===bid?' selected':'');
+    slot.className='invSlot'+(invSelectedBlock===bid?' selected':'')+(activeBlock===bid?' selected':'');
 
     // Draw block preview canvas
     const cv2=document.createElement('canvas');
@@ -2874,17 +3539,22 @@ function renderInventoryGrid(){
       slot.appendChild(hb);
     }
 
-    // Click: select this block type for quick-equip
+    // Click: select this block for placement (works even if not in hotbar)
     slot.addEventListener('click',()=>{
       invSelectedBlock=bid;
-      // Equip to matching hotbar slot if possible
       if(hotbarIdx>=0){
-        selSlot=hotbarIdx; refreshHB();
-        showMsg(def[0]+' sélectionné (slot '+(hotbarIdx+1)+')','#44ffcc');
+        // Block is in hotbar — just switch to that slot
+        selSlot=hotbarIdx;
+        clearActiveBlock();
+        showMsg(def[0]+' sélectionné — slot '+(hotbarIdx+1),'#44ffcc');
       } else {
-        showMsg(def[0]+' — assignez-le à un slot hotbar','#44ccff');
+        // Block not in hotbar — set as active override
+        setActiveBlock(bid);
+        showMsg('✋ '+def[0]+' prêt à poser (clic droit) | 1-9 pour revenir à la hotbar','#ffcc44');
       }
       renderInventoryGrid();
+      // Auto-close inventory so player can place immediately
+      setTimeout(()=>closeInventory(),300);
     });
 
     grid.appendChild(slot);
@@ -3242,6 +3912,10 @@ function getSaveData(){
     changes:[...changeLog.values()],
     torchOrients:[...torchOrient.entries()].map(([k,v])=>({k,v})),
     landmarks,
+    shops:[...shopRegistry.entries()].map(([k,t])=>({k,t})),
+    coins:playerCoins,
+    cityBuilt,
+    structuresBuilt:STRUCTURES.filter(s=>s.built).map(s=>s.name),
     t:Date.now()
   });
 }
@@ -3252,6 +3926,10 @@ function applySaveData(json){
     if(!d||d.v!==1) return false;
     if(d.torchOrients) for(const{k,v} of d.torchOrients) torchOrient.set(k,v);
     if(d.landmarks){landmarks=d.landmarks;saveLandmarks();}
+    if(d.shops) for(const{k,t} of d.shops) shopRegistry.set(k,t);
+    if(d.coins) playerCoins=d.coins;
+    if(d.cityBuilt) cityBuilt=d.cityBuilt;
+    if(d.structuresBuilt) for(const s of STRUCTURES) if(d.structuresBuilt.includes(s.name)) s.built=true;
     // Apply all changes to world
     const toRebuild=new Set();
     for(const c of d.changes){
