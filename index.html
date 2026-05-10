@@ -2,7 +2,7 @@
 <html lang="fr">
 <head>
 <meta charset="UTF-8">
-<title>TristanCraft ∞</title>
+<title>VoxelCraft ∞</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;}
 body{background:#000;overflow:hidden;font-family:monospace;}
@@ -449,7 +449,7 @@ const AIR=0,GRASS=1,DIRT=2,STONE=3,SAND=4,GRAVEL=5,OAK_LOG=6,
       OAK_LEAVES=7,SNOW_BLOCK=8,WATER=9,GLASS=10,COBBLE=11,
       OAK_PLANKS=12,BRICKS=13,ICE=14,CACTUS=15,
       COAL_ORE=16,IRON_ORE=17,GOLD_ORE=18,BEDROCK=19,
-      SANDSTONE=20,OBSIDIAN=21,TORCH=22,CANNON=23;
+      SANDSTONE=20,OBSIDIAN=21,TORCH=22,CANNON=23,DOOR=24,TELEPORTER=25;
 
 // ══════════════════════════════════════════════
 // PIXEL-ART TEXTURES (Minecraft-style 16×16)
@@ -1241,33 +1241,51 @@ let weatherTransition=0; // 0→1 blend
 let lightningTimer=0;
 let weatherParticles=null;
 
-// Rain/snow particle system
+// Rain/snow particle system — realistic streaks
 function createWeatherParticles(){
   if(weatherParticles){scene.remove(weatherParticles);weatherParticles=null;}
-  const count=1200;
+  const isSnow=currentWeather==='snow';
+  const isStorm=currentWeather==='storm';
+  const count=isSnow?800:isStorm?2500:1500;
+
   const geo=new THREE.BufferGeometry();
   const pos=new Float32Array(count*3);
+  const col=new Float32Array(count*3);
   for(let i=0;i<count;i++){
-    pos[i*3]=(Math.random()-0.5)*80;
-    pos[i*3+1]=Math.random()*40;
-    pos[i*3+2]=(Math.random()-0.5)*80;
+    pos[i*3]  =(Math.random()-0.5)*100;
+    pos[i*3+1]=Math.random()*50;
+    pos[i*3+2]=(Math.random()-0.5)*100;
+    // Rain = blue-white, snow = white, storm = darker blue
+    const r=isSnow?0.95:isStorm?0.6:0.75;
+    const g=isSnow?0.97:isStorm?0.65:0.82;
+    const b=isSnow?1.0:isStorm?0.85:0.98;
+    const v=0.8+Math.random()*0.2;
+    col[i*3]=r*v; col[i*3+1]=g*v; col[i*3+2]=b*v;
   }
   geo.setAttribute('position',new THREE.Float32BufferAttribute(pos,3));
-  const isSnow=currentWeather==='snow';
+  geo.setAttribute('color',new THREE.Float32BufferAttribute(col,3));
+
   const mat=new THREE.PointsMaterial({
-    color:isSnow?0xffffff:0x88aaff,
-    size:isSnow?0.25:0.08,
+    size:isSnow?0.22:isStorm?0.09:0.07,
+    vertexColors:true,
     transparent:true,
     opacity:WEATHER_TYPES[currentWeather].rainOp,
     depthWrite:false,
+    sizeAttenuation:true,
   });
   weatherParticles=new THREE.Points(geo,mat);
-  weatherParticles.userData.velocities=new Float32Array(count*3);
+  // Store per-particle velocities
+  const vel=new Float32Array(count*3);
+  const windX=(Math.random()-0.5)*3;
+  const windZ=(Math.random()-0.5)*3;
   for(let i=0;i<count;i++){
-    weatherParticles.userData.velocities[i*3]  =isSnow?(Math.random()-.5)*0.5:0;
-    weatherParticles.userData.velocities[i*3+1]=isSnow?-(0.8+Math.random()*1.2):-(6+Math.random()*4);
-    weatherParticles.userData.velocities[i*3+2]=isSnow?(Math.random()-.5)*0.5:0;
+    vel[i*3]  =isSnow?(Math.random()-0.5)*0.8:windX+(Math.random()-0.5)*0.5;
+    vel[i*3+1]=isSnow?-(0.5+Math.random()*1.0):isStorm?-(14+Math.random()*6):-(8+Math.random()*4);
+    vel[i*3+2]=isSnow?(Math.random()-0.5)*0.8:windZ+(Math.random()-0.5)*0.5;
   }
+  weatherParticles.userData.velocities=vel;
+  weatherParticles.userData.windX=windX;
+  weatherParticles.userData.windZ=windZ;
   scene.add(weatherParticles);
 }
 
@@ -1434,12 +1452,7 @@ function tickWaterFlow(){
   for(const k of newDirty) dirtySet.add(k);
 }
 
-// Hook water flow into block breaking
-const _sbwTrackedOrigWF=sbwTracked;
-function sbwTracked(wx,wy,wz,b){
-  _sbwTrackedOrigWF(wx,wy,wz,b);
-  if(b===AIR) scheduleWaterFlow(wx,wy,wz);
-}
+// Water flow is triggered directly in the mouseup handler — no wrapper needed
 
 // ── Weather HUD element ──────────────────────
 (function addWeatherHUD(){
@@ -1631,6 +1644,7 @@ document.addEventListener('mouseup',e=>{
     if(!tryHitEntity()){
       if(gbw(bx,by,bz)===CANNON) removeCannon(bx,by,bz);
       sbwTracked(bx,by,bz,AIR);
+      scheduleWaterFlow(bx,by,bz); // trigger water physics
     }
   }
   if(e.button===2&&fx!==null&&bx!==null){
@@ -3254,6 +3268,8 @@ function loop(ts){
     if(czt) czt.style.display=isInCity()?'block':'none';
   }
   tickEffects();
+  updateWeather(dt);
+  tickWaterFlow();
   tickAutoSave();
   renderer.render(scene,camera);
 }
